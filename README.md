@@ -45,6 +45,6 @@ Error of some types and/or values are free from obeying these rules. It is only 
 
 ## Roadmap.
 
-- [ ] Configuration support for adding new wrap calls via `<FuncPath>(<SigStyle>)`. <SigStyle> will be either `Errorf` or `Wrap`. 
+- [ ] Configuration support for adding new wrap calls via `<FuncPath>(<SigStyle>)`. `<SigStyle>` will be either `Errorf` or `Wrap`. 
 - [ ] Configuration support for adding new logging calls via `<Src>.<Name>`, where `<Src>` is either package path or type path and `<Name>` is logging function/method name. With the same call tuple `(…, <err>, …)` of course.
 - [ ] Configuration support for adding new god types/error values.
