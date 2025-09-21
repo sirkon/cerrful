@@ -4,7 +4,7 @@ Linter that ensures an error processing respects the "protocol", where:
 
 - You must "wrap" an error on return if a current function has more than two sources of errors.
 - You must log an error if it is not returned out of a current function.
-- Error annotation must have different texts of annotation for different sources.
+- Error annotation must have different texts of annotation for different sources in a current function.
 - Usage of `:` is prohibited in annotation text.
 - There must not be more than one log calls for an error.
 - Errors that are leaving a function must not be logged within it.
