@@ -22,7 +22,7 @@ It is one of calls:
 
 - `fmt.Errorf("<annotation>: %w", …, err)`
 - `github.com/sirkon/errors.Wrap(err, "<annotation>")`
-- `github.com/sirkon/errors.errors.Wrapf(err, "<annotation>", …)
+- `github.com/sirkon/errors.errors.Wrapf(err, "<annotation>", …)`
 
 ### Error logging.
 
