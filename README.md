@@ -33,11 +33,12 @@ Error is checked as logged if there are one of the following calls:
 - `XXX.CCC(…, <err>, …)`, where XXX is either `log` package or an instance of `*log.Logger` type and CCC is one of `Print`, `Printf`, `Println`, `Fatal`, `Fatalf`, `Fatalffn`.
 - `YYY.CCC(…, <err>, …)`, where YYY is either `log/slog` package or an instance of `*log/slog.Logger` type and CCC is one of `Warn`, `WarnContext`, `Error`, `ErrorContext`.
 
-Here `<err>` is (very much grammar like):
+Here `<err>` with _context_ (calling function specific) is :
 
 - An error variable that is being investigated.
 - A wrap call with `<err>`, meaning this would be considered legal: `errors.Wrap(errors.Wrap(err, "do inner thing"), "do outer thing")`
 - On of `errors.Join(…, <err>, …)` or `github.com/sirkon/errors.Join(…, <err>, …)` calls.
+- In case with slog (defined by context) it is also can be `slog.Any(<arg>, <err>)`.
 
 ### Ignored error types/values.
 
@@ -49,3 +50,5 @@ Error of some types and/or values are free from obeying these rules. It is only 
 - [ ] Configuration support for adding new logging calls via `<Src>.<Name>`, where `<Src>` is either package path or type path and `<Name>` is logging function/method name. With the same call tuple `(…, <err>, …)` of course.
 - [ ] Configuration support for adding new god types/error values.
 - [ ] Configuration support for adding functions via `<Src>.<Name>`, whose errors can be returned without a wrap.
+- [ ] Support zap for logging check.
+- [ ] Support zerolog for logging check.
