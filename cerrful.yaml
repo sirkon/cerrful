@@ -1,0 +1,19 @@
+# Default Cerrful configuration
+sentinels:
+  - io.EOF
+
+wrappers:
+  - github.com/sirkon/errors.Wrap
+  - github.com/sirkon/errors.Wrapf
+
+transparent-error-funcs:
+  - package: "github.com/sirkon/errors"
+    name: "Just"
+
+structured-loggers:
+  - zap
+  - zerolog
+  - slog
+  - testing
+
+uniqueness-scope: package
