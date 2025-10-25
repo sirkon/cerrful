@@ -16,8 +16,22 @@ import (
 //go:embed testdata
 var cirTestCases embed.FS
 
-func TestCerrful(t *testing.T) {
-	expected := map[string]*cerrful.CIRProgram{}
+func TestCIR(t *testing.T) {
+	expected := map[string]*cerrful.CIRFunction{
+		// "case_alias_error": {
+		// 	Name: "aliasError",
+		// 	Nodes: []cerrful.Node{
+		// 		cerrful.Assign{
+		// 			Name:    "",
+		// 			RHS:     "",
+		// 			Flavor:  "",
+		// 			IsCtor:  false,
+		// 			CtorMsg: "",
+		// 			CtorVia: "",
+		// 		},
+		// 	},
+		// },
+	}
 
 	files, err := cirTestCases.ReadDir("testdata/circases")
 	if err != nil {
@@ -34,23 +48,33 @@ func TestCerrful(t *testing.T) {
 		}
 
 		t.Run(file.Name(), func(t *testing.T) {
-			cir, err := cirTestCases.ReadFile("testdata/circases/" + file.Name())
+			code, err := cirTestCases.ReadFile("testdata/circases/" + file.Name())
 			if err != nil {
 				t.Fatalf("read file %s: %s", file.Name(), err)
 			}
+
+			got, err := cerrful.DemoTranslate(string(code))
+			if err != nil {
+				t.Fatal("get cir for the case file")
+			}
+
+			t.Log("\n" + got.Pretty(true))
 
 			expectedCIR, ok := expected[file.Name()]
 			if !ok {
 				t.Fatal("no cir found for", file.Name())
 			}
 
-			got, err := cerrful.DemoTranslate(string(cir))
-			if err != nil {
-				t.Fatal("get cir for the case file")
-			}
-
-			if !reflect.DeepEqual(expectedCIR, cir) {
-				deepequal.SideBySide(t, "cir", expectedCIR, got)
+			if !reflect.DeepEqual(expectedCIR, code) {
+				deepequal.SideBySide(
+					t,
+					"cir",
+					&cerrful.CIRProgram{
+						File:      file.Name(),
+						Functions: []cerrful.CIRFunction{*expectedCIR},
+					},
+					got,
+				)
 			}
 
 		})

@@ -1,7 +1,8 @@
 // Package cerrful implements a Go AST -> CIR translator per the Cerrful Rulebook.
-// v17: constructors (config-driven), fmt.Errorf dual role, invented error names for return-only constructors,
-//
-//	keep module-aware local/foreign, msg quotes only, typed refs everywhere.
+// v18.3 (2025-10-21)
+// Changes from v18.2:
+// - Success-path returns are omitted entirely from CIR (e.g., `return nil`, `return x, nil`, etc.).
+// - Keep fixes: alias handling before wrap, last-result-only error handling, no phantasy assigns.
 package cerrful
 
 import (
@@ -16,7 +17,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"unicode/utf8"
 )
 
 // ---------- CIR model ----------
@@ -29,16 +29,51 @@ type Pos struct {
 	Col  int
 }
 
+// AssignSource is an ADT describing the semantic origin of an assigned error value.
+type AssignSource interface{ isAssignSource() }
+
+// AssignSourceCtor represents errors.New / fmt.Errorf w/o %w (i.e., constructor).
+type AssignSourceCtor struct {
+	Msg string // message (unquoted in model, Pretty quotes it)
+	Via string // e.g., "errors.New" or "fmt.Errorf"
+}
+
+func (AssignSourceCtor) isAssignSource() {}
+
+// AssignSourceCall represents a function call producing error, with locality.
+type AssignSourceCall struct {
+	Callee string // rendered, params elided
+	Local  bool   // true if in same module
+}
+
+func (AssignSourceCall) isAssignSource() {}
+
+// AssignSourceSentinel represents a package-level error constant, with locality.
+type AssignSourceSentinel struct {
+	Symbol string // e.g., "os.ErrNotExist"
+	Local  bool
+}
+
+func (AssignSourceSentinel) isAssignSource() {}
+
+// AssignSourceAlias represents direct aliasing of another error variable: err := otherErr.
+type AssignSourceAlias struct {
+	Target string // identifier name of RHS
+}
+
+func (AssignSourceAlias) isAssignSource() {}
+
+// AssignSourceTypeAssert represents a type assertion producing an error value.
+type AssignSourceTypeAssert struct {
+	Expr string // e.g., "t.(error)"
+}
+
+func (AssignSourceTypeAssert) isAssignSource() {}
+
 type Assign struct {
 	Pos  Pos
-	Name string
-	// One of the following RHS modes is used:
-	RHS    string // for normal expressions/calls/sentinels (params elided); no quotes
-	Flavor string // "local call" | "foreign call" | "local sentinel" | "foreign sentinel" | "expr"
-	// Constructor mode:
-	IsCtor  bool   // true => this Assign renders as: NewError msg="..." (via <pkg>.<name>)
-	CtorMsg string // message (quoted in Pretty)
-	CtorVia string // callee for constructors, like "errors.New" or "fmt.Errorf"
+	Name string       // LHS variable or "@err" synthetic for direct returns (when no named return error)
+	Src  AssignSource // ADT variant for RHS
 }
 
 func (Assign) isNode() {}
@@ -116,6 +151,7 @@ type Config struct {
 	Loggers      []LoggerSpec
 	Checkers     []CheckerSpec
 	Constructors []Ref // functions that construct errors (no %w semantics)
+	// Future: map of function name -> error result index
 }
 
 func DefaultConfig() Config {
@@ -192,13 +228,13 @@ func (t *Translator) TranslateFile(filename string, src []byte) (*CIRProgram, er
 			continue
 		}
 		st := newState(fn.Name.Name)
-		// register named error returns
+		// register named error returns (signature only)
 		if fn.Type.Results != nil {
 			for _, res := range fn.Type.Results.List {
 				if len(res.Names) > 0 {
 					for _, id := range res.Names {
 						if t.typeIsError(res.Type) {
-							st.errVars[id.Name] = true
+							st.namedRet[id.Name] = true
 						}
 					}
 				}
@@ -216,16 +252,18 @@ func DemoTranslate(code string) (*CIRProgram, error) {
 }
 
 type state struct {
-	errVars   map[string]bool
-	funcName  string
-	usedNames map[string]int // track invented names per function
+	// names in scope that are error-like (heuristic) — used for log/check capture
+	errVars map[string]bool
+	// only named return error parameters from the function signature
+	namedRet map[string]bool
+	funcName string
 }
 
 func newState(fn string) *state {
 	return &state{
-		errVars:   make(map[string]bool),
-		funcName:  fn,
-		usedNames: make(map[string]int),
+		errVars:  make(map[string]bool),
+		namedRet: make(map[string]bool),
+		funcName: fn,
 	}
 }
 
@@ -251,46 +289,67 @@ func (t *Translator) walkBlock(b *ast.BlockStmt, st *state) []Node {
 func (t *Translator) onAssign(as *ast.AssignStmt, st *state) []Node {
 	var out []Node
 
-	// Single LHS
+	// Single LHS: err := X  /  err = X
 	if len(as.Lhs) == 1 {
 		if id, ok := as.Lhs[0].(*ast.Ident); ok {
 			if len(as.Rhs) == 1 {
-				// Detect constructor calls first
+				// RHS classification (constructor / wrap / alias / sentinel / call / type-assert)
 				if ce, ok := as.Rhs[0].(*ast.CallExpr); ok {
 					if via, msg, okCtor, okWrap := t.classifyConstructorOrWrap(ce); okCtor {
-						// Constructor: Assign <- NewError msg="..." (via X.Y)
-						out = append(out, Assign{
-							Pos: t.posOfNode(as), Name: id.Name,
-							IsCtor: true, CtorMsg: msg, CtorVia: via,
-						})
+						out = append(out, Assign{Pos: t.posOfNode(as), Name: id.Name, Src: AssignSourceCtor{Msg: msg, Via: via}})
 						st.errVars[id.Name] = true
 						return out
 					} else if okWrap {
-						// Wrap: Assign underlying + Wrap
-						// underlying error is last arg
+						// underlying error is last arg; bind it first, then Wrap
 						var underlying ast.Expr
 						if len(ce.Args) > 1 {
 							underlying = ce.Args[len(ce.Args)-1]
 						}
-						rhsText, flavor := t.classifyExpr(underlying)
-						out = append(out, Assign{Pos: t.posOfNode(as), Name: id.Name, RHS: rhsText, Flavor: flavor})
+						src := t.classifyAssignSource(underlying)
+						out = append(out, Assign{Pos: t.posOfNode(as), Name: id.Name, Src: src})
 						st.errVars[id.Name] = true
-						out = append(out, Wrap{Pos: t.posOfNode(as), Name: id.Name, Msg: msg, Via: "fmt.Errorf"})
+						out = append(out, Wrap{Pos: t.posOfNode(as), Name: id.Name, Msg: normalizeWrapMsg(firstStringArg(ce)), Via: "fmt.Errorf"})
 						return out
 					}
 				}
+
+				// Type assertion to error: err := t.(error)
+				if ta, ok := as.Rhs[0].(*ast.TypeAssertExpr); ok && t.exprIsErrorAssert(ta) {
+					out = append(out, Assign{Pos: t.posOfNode(as), Name: id.Name, Src: AssignSourceTypeAssert{Expr: t.exprString(as.Rhs[0])}})
+					st.errVars[id.Name] = true
+					return out
+				}
+
+				// Alias: err := otherErr (single ident of error type)
+				if rid, ok := as.Rhs[0].(*ast.Ident); ok {
+					if t.identIsErrorVar(rid) {
+						out = append(out, Assign{Pos: t.posOfNode(as), Name: id.Name, Src: AssignSourceAlias{Target: rid.Name}})
+						st.errVars[id.Name] = true
+						return out
+					}
+				}
+
+				// Sentinel or call or (fallback) alias
+				src := t.classifyAssignSource(as.Rhs[0])
+				out = append(out, Assign{Pos: t.posOfNode(as), Name: id.Name, Src: src})
+				// Heuristic: mark any LHS name ending with "err" as error-var for logging/checks
+				if id.Name == "err" || strings.HasSuffix(strings.ToLower(id.Name), "err") {
+					st.errVars[id.Name] = true
+				}
+				return out
 			}
 		}
 	}
 
-	// Multi-value: _, err := fn()
+	// Multi-value call: _, err := fn()
 	if len(as.Rhs) == 1 {
 		if _, ok := as.Rhs[0].(*ast.CallExpr); ok {
 			if len(as.Lhs) > 1 {
 				last := as.Lhs[len(as.Lhs)-1]
 				if id, ok := last.(*ast.Ident); ok {
-					rhsText, flavor := t.classifyExpr(as.Rhs[0])
-					out = append(out, Assign{Pos: t.posOfNode(as), Name: id.Name, RHS: rhsText, Flavor: flavor})
+					call := as.Rhs[0].(*ast.CallExpr)
+					src := t.assignSourceForCall(call)
+					out = append(out, Assign{Pos: t.posOfNode(as), Name: id.Name, Src: src})
 					st.errVars[id.Name] = true
 					return out
 				}
@@ -298,6 +357,7 @@ func (t *Translator) onAssign(as *ast.AssignStmt, st *state) []Node {
 		}
 	}
 
+	// General multi-assign: best-effort per pair
 	for i, lhs := range as.Lhs {
 		id, ok := lhs.(*ast.Ident)
 		if !ok {
@@ -310,9 +370,33 @@ func (t *Translator) onAssign(as *ast.AssignStmt, st *state) []Node {
 		if rhs == nil {
 			continue
 		}
-		rhsText, flavor := t.classifyExpr(rhs)
-		out = append(out, Assign{Pos: t.posOfNode(as), Name: id.Name, RHS: rhsText, Flavor: flavor})
-		// track likely error vars
+		var src AssignSource
+		// special cases
+		if ce, ok := rhs.(*ast.CallExpr); ok {
+			if via, msg, okCtor, okWrap := t.classifyConstructorOrWrap(ce); okCtor {
+				src = AssignSourceCtor{Msg: msg, Via: via}
+			} else if okWrap {
+				// Bind rhs last arg then wrap
+				var underlying ast.Expr
+				if len(ce.Args) > 1 {
+					underlying = ce.Args[len(ce.Args)-1]
+				}
+				src = t.classifyAssignSource(underlying)
+				out = append(out, Assign{Pos: t.posOfNode(as), Name: id.Name, Src: src})
+				st.errVars[id.Name] = true
+				out = append(out, Wrap{Pos: t.posOfNode(as), Name: id.Name, Msg: normalizeWrapMsg(firstStringArg(ce)), Via: "fmt.Errorf"})
+				continue
+			} else {
+				src = t.assignSourceForCall(ce)
+			}
+		} else if ta, ok := rhs.(*ast.TypeAssertExpr); ok && t.exprIsErrorAssert(ta) {
+			src = AssignSourceTypeAssert{Expr: t.exprString(rhs)}
+		} else if rid, ok := rhs.(*ast.Ident); ok && t.identIsErrorVar(rid) {
+			src = AssignSourceAlias{Target: rid.Name}
+		} else {
+			src = t.classifyAssignSource(rhs)
+		}
+		out = append(out, Assign{Pos: t.posOfNode(as), Name: id.Name, Src: src})
 		if id.Name == "err" || strings.HasSuffix(strings.ToLower(id.Name), "err") {
 			st.errVars[id.Name] = true
 		}
@@ -326,7 +410,7 @@ func (t *Translator) onExpr(e ast.Expr, st *state) []Node {
 		return nil
 	}
 
-	// panic
+	// panic(...)
 	if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "panic" {
 		if len(call.Args) == 0 {
 			return nil
@@ -334,7 +418,7 @@ func (t *Translator) onExpr(e ast.Expr, st *state) []Node {
 		arg := call.Args[0]
 		if ce, ok := arg.(*ast.CallExpr); ok {
 			if _, msg, _, okWrap := t.classifyConstructorOrWrap(ce); okWrap {
-				errName := "err" // best-effort
+				errName := "@err" // synthetic
 				return []Node{
 					Wrap{Pos: t.posOfNode(e), Name: errName, Msg: msg, Via: "fmt.Errorf"},
 					Log{Pos: t.posOfNode(e), Vars: []string{errName}, Level: "fatal", Via: "panic"},
@@ -406,36 +490,71 @@ func (t *Translator) onIf(s *ast.IfStmt, st *state) []Node {
 
 func (t *Translator) onReturn(r *ast.ReturnStmt, st *state) []Node {
 	var out []Node
-	for _, res := range r.Results {
-		switch v := res.(type) {
-		case *ast.CallExpr:
-			// %w => Wrap; constructor => NewError Assign+Return
-			if via, msg, okCtor, okWrap := t.classifyConstructorOrWrap(v); okWrap {
-				errName := t.inventErrName(st)
-				out = append(out, Wrap{Pos: t.posOfNode(r), Name: errName, Msg: msg, Via: "fmt.Errorf"})
-				out = append(out, Return{Pos: t.posOfNode(r), Name: errName})
-				return out
-			} else if okCtor {
-				var name string
-				if retName := t.findNamedErrorReturn(st); retName != "" {
-					name = retName
-				} else {
-					name = t.inventErrName(st)
-				}
-				out = append(out, Assign{
-					Pos: t.posOfNode(r), Name: name,
-					IsCtor: true, CtorMsg: msg, CtorVia: via,
-				})
-				out = append(out, Return{Pos: t.posOfNode(r), Name: name})
-				return out
-			}
-		case *ast.Ident:
-			if st.errVars[v.Name] {
-				out = append(out, Return{Pos: t.posOfNode(r), Name: v.Name})
-				return out
-			}
-		}
+	// Only process the last return expression — by rule, that's the error unless overridden (future).
+	if len(r.Results) == 0 {
+		return out
 	}
+	idx := len(r.Results) - 1
+	res := r.Results[idx]
+
+	// --- v18.3 success-path pruning ---
+	if isNilLiteral(res) {
+		// Success return (error is nil): omit entirely.
+		return out
+	}
+
+	switch v := res.(type) {
+	case *ast.CallExpr:
+		// %w => Wrap; constructor => Ctor
+		if via, msg, okCtor, okWrap := t.classifyConstructorOrWrap(v); okWrap {
+			// choose name: prefer named return error (signature); else "@err"
+			name := t.findNamedErrorReturn(st)
+			if name == "" {
+				name = "@err"
+			}
+			// underlying to assign first
+			var underlying ast.Expr
+			if len(v.Args) > 1 {
+				underlying = v.Args[len(v.Args)-1]
+			}
+			src := t.classifyAssignSource(underlying)
+			// If it's a plain alias to some var, no need to "rebind" into name before wrapping
+			if _, isAlias := src.(AssignSourceAlias); !isAlias {
+				out = append(out, Assign{Pos: t.posOfNode(r), Name: name, Src: src})
+			}
+			out = append(out, Wrap{Pos: t.posOfNode(r), Name: name, Msg: msg, Via: "fmt.Errorf"})
+			out = append(out, Return{Pos: t.posOfNode(r), Name: name})
+			return out
+		} else if okCtor {
+			name := t.findNamedErrorReturn(st)
+			if name == "" {
+				name = "@err"
+			}
+			out = append(out, Assign{Pos: t.posOfNode(r), Name: name, Src: AssignSourceCtor{Msg: msg, Via: via}})
+			out = append(out, Return{Pos: t.posOfNode(r), Name: name})
+			return out
+		}
+	case *ast.TypeAssertExpr:
+		if t.exprIsErrorAssert(v) {
+			name := t.findNamedErrorReturn(st)
+			if name == "" {
+				name = "@err"
+			}
+			out = append(out, Assign{Pos: t.posOfNode(r), Name: name, Src: AssignSourceTypeAssert{Expr: t.exprString(v)}})
+			out = append(out, Return{Pos: t.posOfNode(r), Name: name})
+			return out
+		}
+	case *ast.Ident, *ast.SelectorExpr:
+		name := t.findNamedErrorReturn(st)
+		if name == "" {
+			name = "@err"
+		}
+		src := t.classifyAssignSource(v)
+		out = append(out, Assign{Pos: t.posOfNode(r), Name: name, Src: src})
+		out = append(out, Return{Pos: t.posOfNode(r), Name: name})
+		return out
+	}
+
 	return out
 }
 
@@ -467,55 +586,85 @@ func (t *Translator) classifyConstructorOrWrap(call *ast.CallExpr) (via string, 
 	return via, "", false, false
 }
 
-func (t *Translator) classifyExpr(e ast.Expr) (short string, flavor string) {
-	switch v := e.(type) {
-	case *ast.CallExpr:
-		return t.shortCall(v)
-	case *ast.SelectorExpr:
-		// Possible sentinel: pkg.ErrX
-		pkgName, full := t.selectorText(v)
-		typ := t.info.TypeOf(v)
+func (t *Translator) classifyAssignSource(e ast.Expr) AssignSource {
+	// Calls
+	if c, ok := e.(*ast.CallExpr); ok {
+		return t.assignSourceForCall(c)
+	}
+	// Type assertion to error
+	if ta, ok := e.(*ast.TypeAssertExpr); ok && t.exprIsErrorAssert(ta) {
+		return AssignSourceTypeAssert{Expr: t.exprString(e)}
+	}
+	// Selector: possible sentinel pkg.ErrX
+	if sel, ok := e.(*ast.SelectorExpr); ok {
+		pkgName, full := t.selectorText(sel)
+		typ := t.info.TypeOf(sel)
 		if typ != nil && types.AssignableTo(typ, t.errIface) {
 			// Determine package path via Uses
-			if obj := t.info.Uses[v.Sel]; obj != nil && obj.Pkg() != nil {
-				if t.isPkgLocal(obj.Pkg()) {
-					return full, "local sentinel"
-				}
-				return full, "foreign sentinel"
+			if obj := t.info.Uses[sel.Sel]; obj != nil && obj.Pkg() != nil {
+				local := t.isPkgLocal(obj.Pkg())
+				return AssignSourceSentinel{Symbol: full, Local: local}
 			}
 			// Fallback: stdlib or unknown -> foreign
 			if pkgName != "" && pkgName != t.pkgName {
-				return full, "foreign sentinel"
+				return AssignSourceSentinel{Symbol: full, Local: false}
 			}
-			return full, "expr"
 		}
-		return full, "expr"
-	case *ast.Ident:
-		// IDENT classification: distinguish package-level sentinel vs local variable
-		typ := t.info.TypeOf(v)
-		if typ != nil && types.AssignableTo(typ, t.errIface) {
-			if obj := t.info.Uses[v]; obj != nil {
-				// package-level sentinel if parent is package scope
-				if pkg := obj.Pkg(); pkg != nil {
-					if obj.Parent() == pkg.Scope() {
-						if t.isPkgLocal(pkg) {
-							return v.Name, "local sentinel"
-						}
-						return v.Name, "foreign sentinel"
-					}
-				}
-				// local variable/param/captured
-				return v.Name, "expr"
-			}
-			return v.Name, "expr"
-		}
-		return v.Name, "expr"
-	default:
-		// Render and attempt to simplify (strip spaces)
-		txt := t.exprString(e)
-		txt = strings.ReplaceAll(txt, " ", "")
-		return txt, "expr"
 	}
+	// Ident: may be sentinel (pkg-level) or variable; alias if variable of error type
+	if id, ok := e.(*ast.Ident); ok {
+		typ := t.info.TypeOf(id)
+		if typ != nil && types.AssignableTo(typ, t.errIface) {
+			if obj := t.info.Uses[id]; obj != nil {
+				// package-level sentinel if parent is package scope
+				if pkg := obj.Pkg(); pkg != nil && obj.Parent() == pkg.Scope() {
+					return AssignSourceSentinel{Symbol: id.Name, Local: t.isPkgLocal(pkg)}
+				}
+			}
+			// variable or param
+			return AssignSourceAlias{Target: id.Name}
+		}
+	}
+	// Fallback: render as alias of expression text (very rare)
+	txt := t.exprString(e)
+	return AssignSourceAlias{Target: txt}
+}
+
+func (t *Translator) assignSourceForCall(c *ast.CallExpr) AssignSource {
+	callee, locality := t.shortCall(c)
+	return AssignSourceCall{Callee: callee, Local: locality == "local call"}
+}
+
+func (t *Translator) exprIsErrorAssert(ta *ast.TypeAssertExpr) bool {
+	if ta == nil || ta.Type == nil {
+		return false
+	}
+	typ := t.info.TypeOf(ta.Type)
+	return typ != nil && types.AssignableTo(typ, t.errIface)
+}
+
+func (t *Translator) identIsErrorVar(id *ast.Ident) bool {
+	if id == nil {
+		return false
+	}
+	typ := t.info.TypeOf(id)
+	if typ == nil {
+		return false
+	}
+	return types.AssignableTo(typ, t.errIface)
+}
+
+func (t *Translator) typeIsError(expr ast.Expr) bool {
+	typ := t.info.TypeOf(expr)
+	return typ != nil && types.AssignableTo(typ, t.errIface)
+}
+
+func (t *Translator) findNamedErrorReturn(st *state) string {
+	// Only named return params from the signature qualify here.
+	for name := range st.namedRet {
+		return name // if multiple, first is fine; could sort deterministically if needed
+	}
+	return ""
 }
 
 func (t *Translator) shortCall(c *ast.CallExpr) (string, string) {
@@ -525,7 +674,7 @@ func (t *Translator) shortCall(c *ast.CallExpr) (string, string) {
 		// pkg.Func(...) or recv.Method(...)
 		if id, ok := fun.X.(*ast.Ident); ok {
 			// Package func
-			name := id.Name + "." + fun.Sel.Name + t.elideParams(len(c.Args))
+			name := id.Name + "." + fun.Sel.Name + elideParams(len(c.Args))
 			// Resolve package path: Sel use points to *types.Func, whose Pkg is the defining package
 			if obj := t.info.Uses[fun.Sel]; obj != nil && obj.Pkg() != nil {
 				if t.isPkgLocal(obj.Pkg()) {
@@ -541,23 +690,23 @@ func (t *Translator) shortCall(c *ast.CallExpr) (string, string) {
 		}
 		// Method call on receiver: use selection to find defining package
 		if sel := t.info.Selections[fun]; sel != nil {
-			name := t.exprString(fun.X) + "." + sel.Obj().Name() + t.elideParams(len(c.Args))
+			name := t.exprString(fun.X) + "." + sel.Obj().Name() + elideParams(len(c.Args))
 			if sel.Obj().Pkg() != nil && t.isPkgLocal(sel.Obj().Pkg()) {
 				return name, "local call"
 			}
 			return name, "foreign call"
 		}
 		// Fallback
-		return t.exprString(fun) + t.elideParams(len(c.Args)), "expr"
+		return t.exprString(fun) + elideParams(len(c.Args)), "expr"
 	case *ast.Ident:
 		// Unqualified function in same package => local call
-		return fun.Name + t.elideParams(len(c.Args)), "local call"
+		return fun.Name + elideParams(len(c.Args)), "local call"
 	default:
-		return t.exprString(c.Fun) + t.elideParams(len(c.Args)), "expr"
+		return t.exprString(c.Fun) + elideParams(len(c.Args)), "expr"
 	}
 }
 
-func (t *Translator) elideParams(n int) string {
+func elideParams(n int) string {
 	if n == 0 {
 		return "()"
 	}
@@ -632,37 +781,6 @@ func (t *Translator) isPkgLocal(p *types.Package) bool {
 
 // ---------- Utilities ----------
 
-func (t *Translator) isFmtErrorf(call *ast.CallExpr) bool {
-	if fun, ok := call.Fun.(*ast.SelectorExpr); ok {
-		if pkg, ok := fun.X.(*ast.Ident); ok && pkg.Name == "fmt" && fun.Sel.Name == "Errorf" {
-			return true
-		}
-	}
-	return false
-}
-
-func (t *Translator) parseFmtErrorf(call *ast.CallExpr) (string, string) {
-	if len(call.Args) == 0 {
-		return "", ""
-	}
-	if lit, ok := call.Args[0].(*ast.BasicLit); ok && strings.Contains(lit.Value, "%w") {
-		msg := strings.Trim(lit.Value, "`\"")
-		msg = normalizeWrapMsg(msg)
-		var errName string
-		if len(call.Args) > 1 {
-			if id, ok := call.Args[len(call.Args)-1].(*ast.Ident); ok {
-				errName = id.Name
-			}
-		}
-		if errName == "" {
-			errName = "err"
-		}
-		return msg, errName
-	}
-	return "", ""
-}
-
-// normalize wrap label variations
 func normalizeWrapMsg(m string) string {
 	m = strings.TrimSpace(m)
 	m = strings.TrimSuffix(m, ": %w")
@@ -723,61 +841,6 @@ func (t *Translator) exprString(e ast.Expr) string {
 	return b.String()
 }
 
-// name invention: err, errFuncName, errFuncName2, ...
-func (t *Translator) inventErrName(st *state) string {
-	// prefer "err" if unused
-	if st.usedNames["err"] == 0 && !st.errVars["err"] {
-		st.usedNames["err"] = 1
-		st.errVars["err"] = true
-		return "err"
-	}
-	base := "err" + toCamel(st.funcName)
-	n := st.usedNames[base]
-	if n == 0 {
-		st.usedNames[base] = 1
-		st.errVars[base] = true
-		return base
-	}
-	n++
-	st.usedNames[base] = n
-	name := fmt.Sprintf("%s%d", base, n)
-	st.errVars[name] = true
-	return name
-}
-
-func toLowerCamel(s string) string {
-	if s == "" {
-		return ""
-	}
-	r, size := utf8.DecodeRuneInString(s)
-	if r == utf8.RuneError && size == 0 {
-		return s
-	}
-	return strings.ToLower(string(r)) + s[size:]
-}
-
-func (t *Translator) typeIsError(expr ast.Expr) bool {
-	typ := t.info.TypeOf(expr)
-	return typ != nil && types.AssignableTo(typ, t.errIface)
-}
-
-func (t *Translator) findNamedErrorReturn(st *state) string {
-	for name := range st.errVars {
-		if name != "err" && strings.HasSuffix(strings.ToLower(name), "err") {
-			return name
-		}
-	}
-	return ""
-}
-
-func toCamel(s string) string {
-	if s == "" {
-		return ""
-	}
-	r, size := utf8.DecodeRuneInString(s)
-	return strings.ToUpper(string(r)) + s[size:]
-}
-
 // ---------- Pretty ----------
 
 func (p *CIRProgram) Pretty(indentedBlocks bool) string {
@@ -804,18 +867,31 @@ func renderNode(b *strings.Builder, n Node, indent int, indentedBlocks bool) {
 	ind := strings.Repeat("  ", indent)
 	switch x := n.(type) {
 	case Assign:
-		if x.IsCtor {
-			if x.CtorVia != "" {
-				fmt.Fprintf(b, "%sAssign [%s] <- NewError msg=%q (via %s)\n", ind, x.Name, x.CtorMsg, x.CtorVia)
+		switch src := x.Src.(type) {
+		case AssignSourceCtor:
+			if src.Via != "" {
+				fmt.Fprintf(b, "%sAssign [%s] <- NewError msg=%q (via %s)\n", ind, x.Name, src.Msg, src.Via)
 			} else {
-				fmt.Fprintf(b, "%sAssign [%s] <- NewError msg=%q\n", ind, x.Name, x.CtorMsg)
+				fmt.Fprintf(b, "%sAssign [%s] <- NewError msg=%q\n", ind, x.Name, src.Msg)
 			}
-			return
-		}
-		if x.Flavor != "" && x.Flavor != "expr" {
-			fmt.Fprintf(b, "%sAssign [%s] <- %s (%s)\n", ind, x.Name, x.RHS, x.Flavor)
-		} else {
-			fmt.Fprintf(b, "%sAssign [%s] <- %s\n", ind, x.Name, x.RHS)
+		case AssignSourceCall:
+			loc := "foreign"
+			if src.Local {
+				loc = "local"
+			}
+			fmt.Fprintf(b, "%sAssign [%s] <- %s (%s call)\n", ind, x.Name, src.Callee, loc)
+		case AssignSourceSentinel:
+			loc := "foreign"
+			if src.Local {
+				loc = "local"
+			}
+			fmt.Fprintf(b, "%sAssign [%s] <- %s (%s sentinel)\n", ind, x.Name, src.Symbol, loc)
+		case AssignSourceAlias:
+			fmt.Fprintf(b, "%sAssign [%s] <- %s\n", ind, x.Name, src.Target)
+		case AssignSourceTypeAssert:
+			fmt.Fprintf(b, "%sAssign [%s] <- %s (type assertion)\n", ind, x.Name, src.Expr)
+		default:
+			fmt.Fprintf(b, "%sAssign [%s] <- <unknown>\n", ind, x.Name)
 		}
 	case Wrap:
 		fmt.Fprintf(b, "%sWrap [%s] msg=%q (via %s)\n", ind, x.Name, x.Msg, x.Via)
@@ -829,7 +905,7 @@ func renderNode(b *strings.Builder, n Node, indent int, indentedBlocks bool) {
 		if len(x.Vars) == 0 {
 			fmt.Fprintf(b, "%sCheck %v class=%s (via %s)\n", ind, x.Args, class, name)
 		} else {
-			fmt.Fprintf(b, "%sCheck %v class=%s (via %s)\n", ind, bracketVars(x.Vars), class, name)
+			fmt.Fprintf(b, "%sCheck %v class=%s (via %s)\n", ind, "["+strings.Join(x.Vars, " ")+"]", class, name)
 		}
 	case If:
 		if indentedBlocks {
@@ -859,9 +935,9 @@ func renderNode(b *strings.Builder, n Node, indent int, indentedBlocks bool) {
 	}
 }
 
-func bracketVars(v []string) string {
-	if len(v) == 0 {
-		return "[]"
-	}
-	return "[" + strings.Join(v, " ") + "]"
+// ---------- tiny helpers ----------
+
+func isNilLiteral(e ast.Expr) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == "nil"
 }
