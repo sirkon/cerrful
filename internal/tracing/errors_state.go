@@ -1,4 +1,4 @@
-package tmp
+package tracing
 
 // State allow to control facts over error variable.
 type State struct {

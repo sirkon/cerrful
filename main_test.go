@@ -33,7 +33,7 @@ func TestCIR(t *testing.T) {
 		// },
 	}
 
-	files, err := cirTestCases.ReadDir("testdata/circases")
+	files, err := cirTestCases.ReadDir("testdata/cases")
 	if err != nil {
 		t.Fatal(fmt.Errorf("list files for CIR checks: %w", err))
 	}
@@ -48,7 +48,7 @@ func TestCIR(t *testing.T) {
 		}
 
 		t.Run(file.Name(), func(t *testing.T) {
-			code, err := cirTestCases.ReadFile("testdata/circases/" + file.Name())
+			code, err := cirTestCases.ReadFile("testdata/cases/" + file.Name())
 			if err != nil {
 				t.Fatalf("read file %s: %s", file.Name(), err)
 			}

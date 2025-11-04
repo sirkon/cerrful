@@ -25,7 +25,7 @@ type ErrorVarNode interface {
 	isErrorVarNode()
 }
 
-// ErrorTypeGuess marks nodes responsible for deducing the type of an error,
+// ErrorTypeGuess marks nodes responsible for deducing the type of error,
 // when its nature cannot be directly inferred from syntax.
 type ErrorTypeGuess interface {
 	isErrorTypeGuess()
@@ -38,6 +38,11 @@ type Reference struct {
 	// Package is the import path of the package that declares the entity
 	// (e.g., "io", "fmt", or "example.com/project/module").
 	Package string
+
+	// Type is type package-local name. It is needed when some method of
+	// a type should be referenced. Will be empty for free functions and
+	// variables/constants.
+	Type string
 
 	// Name is the declared identifier of the entity within its package.
 	Name string

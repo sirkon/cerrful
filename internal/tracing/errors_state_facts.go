@@ -1,13 +1,8 @@
-package tmp
+package tracing
 
 import (
 	"github.com/sirkon/cerrful/internal/cir"
 )
-
-// TODO think of a transformation applied when we out of the its context. Say, if we were in the scope
-//  where it was known for err == nil and there was a straight return with that err, we must conclude
-//  it is err != nil strictly when we traced out of that scope. And the vice versa.
-//  And so on.
 
 // Facts keeps facts about an error variable.
 type Facts struct {
