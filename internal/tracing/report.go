@@ -8,8 +8,8 @@ import (
 	"github.com/sirkon/cerrful/internal/cerrules"
 )
 
-// Reporter collects and classifies inconsistencies discovered during tracing.
-type Reporter struct {
+// ReportEngine collects and classifies inconsistencies discovered during tracing.
+type ReportEngine struct {
 	mu      sync.Mutex
 	reports []Report
 }
@@ -18,7 +18,7 @@ type Reporter struct {
 type Report struct {
 	Phase    ReportPhase
 	RuleCode cerrules.Rule
-	Pos      token.Position
+	Pos      token.Pos
 	Message  string
 	Details  any
 }
@@ -27,15 +27,15 @@ type Report struct {
 type ReportPhase int
 
 const (
-	reportPhaseInvalid ReportPhase = iota
-	ReportSource                   // AST collection phase
-	ReportTrace                    // SSA scanning / path interpretation
-	ReportState                    // post-trace error state analysis
+	_           ReportPhase = iota
+	ReportScrap             // AST scrapping phase
+	ReportTrace             // SSA scanning / path interpretation
+	ReportState             // post-trace error state analysis
 )
 
 func (p ReportPhase) String() string {
 	switch p {
-	case ReportSource:
+	case ReportScrap:
 		return "source"
 	case ReportTrace:
 		return "trace"
@@ -46,22 +46,22 @@ func (p ReportPhase) String() string {
 	}
 }
 
-// ReporterPhase binds a Reporter to a fixed phase.
+// ReporterPhase binds a ReportEngine to a fixed phase.
 // It is used during an entire analysis pass to record rule violations
 // without specifying the phase repeatedly.
 type ReporterPhase struct {
-	parent *Reporter
+	parent *ReportEngine
 	phase  ReportPhase
 }
 
-// Phase returns a pointer to a phase-bound reporter that automatically
+// Phase exits a pointer to a phase-bound reporter that automatically
 // sets the given phase for all reports produced through it.
-func (r *Reporter) Phase(p ReportPhase) *ReporterPhase {
+func (r *ReportEngine) Phase(p ReportPhase) *ReporterPhase {
 	return &ReporterPhase{parent: r, phase: p}
 }
 
 // Report adds a new record to the reporter.
-func (r *Reporter) Report(rep Report) {
+func (r *ReportEngine) Report(rep Report) {
 	r.mu.Lock()
 	r.reports = append(r.reports, rep)
 	r.mu.Unlock()
@@ -69,7 +69,10 @@ func (r *Reporter) Report(rep Report) {
 
 // Report records a new rule violation under the bound phase.
 // It accepts a cerrules.Rule, human-readable message, and source position.
-func (rp *ReporterPhase) Report(rule cerrules.Rule, message string, pos token.Position) {
+func (rp *ReporterPhase) Report(rule cerrules.Rule, message string, pos token.Pos) {
+	if message == "" {
+		message = rule.Description()
+	}
 	rp.parent.Report(Report{
 		Phase:    rp.phase,
 		RuleCode: rule,
@@ -78,8 +81,8 @@ func (rp *ReporterPhase) Report(rule cerrules.Rule, message string, pos token.Po
 	})
 }
 
-// Reports returns a snapshot of all collected records.
-func (r *Reporter) Reports() []Report {
+// Reports exits a snapshot of all collected records.
+func (r *ReportEngine) Reports() []Report {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]Report, len(r.reports))
@@ -88,13 +91,15 @@ func (r *Reporter) Reports() []Report {
 }
 
 // PrintSummary prints all collected reports in a compact, human-readable form.
-func (r *Reporter) PrintSummary() {
+func (r *ReportEngine) PrintSummary(fset *token.FileSet) {
 	for _, rep := range r.Reports() {
+		pos := fset.Position(rep.Pos)
 		fmt.Printf("[%s] %s — %s (%s:%d)\n",
 			rep.Phase,
 			rep.RuleCode,
 			rep.Message,
-			rep.Pos.Filename,
-			rep.Pos.Line)
+			pos.Filename,
+			pos.Line,
+		)
 	}
 }

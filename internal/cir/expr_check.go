@@ -3,7 +3,7 @@ package cir
 // ErrorTypeIsCheck represents `errors.Is` (and equivalents) usage in a source code. The type is being dug
 // is stored in Type, the [errors.Is] thing used referenced in Ref. The source of an error is in Src.
 //
-//	errors.Is(err, io.EOF) // Src: "err", Type: "io"."EOF", Ref: "errors"."IO"
+//	errors.Is(err, io.EOF) // Var: "err", Type: "io"."EOF", Ref: "errors"."IO"
 type ErrorTypeIsCheck struct {
 	Src  *ExprVar
 	Type Reference
@@ -14,7 +14,7 @@ type ErrorTypeIsCheck struct {
 // ErrorTypeIsHelperCheck represents recognized and registered helpers that check for specific error types,
 // such as os.IsNotExist.
 //
-//	os.IsExists(err) // Src: "err", Type: "os"."IsExists".
+//	os.IsExists(err) // Var: "err", Type: "os"."IsExists".
 type ErrorTypeIsHelperCheck struct {
 	Src *ExprVar
 	Ref Reference
@@ -22,14 +22,14 @@ type ErrorTypeIsHelperCheck struct {
 
 // ErrorValueIsNotNil represents "err != nil"
 //
-//	err != nil // Src: "err"
+//	err != nil // Var: "err"
 type ErrorValueIsNotNil struct {
 	Src *ExprVar
 }
 
 // ErrorValueIsNil represents "err == nil"
 //
-//	err == nil // Src: "err"
+//	err == nil // Var: "err"
 type ErrorValueIsNil struct {
 	Src *ExprVar
 }
@@ -37,7 +37,7 @@ type ErrorValueIsNil struct {
 // ErrorValueEQ represents an equality comparison between an error and
 // a specific sentinel or typed value.
 //
-//	err == io.EOF // Src: "err", RHS: "io"."EOF"
+//	err == io.EOF // Var: "err", RHS: "io"."EOF"
 type ErrorValueEQ struct {
 	Src *ExprVar
 	RHS Expr
@@ -46,7 +46,7 @@ type ErrorValueEQ struct {
 // ErrorValueNEQ represents an inequality comparison between an error and
 // a specific sentinel or typed value.
 //
-//	err != io.EOF // Src: "err", Type: "io.EOF"
+//	err != io.EOF // Var: "err", Type: "io.EOF"
 type ErrorValueNEQ struct {
 	Src *ExprVar
 	RHS Expr
@@ -56,7 +56,7 @@ type ErrorValueNEQ struct {
 // is stored in Type, the [errors.As] thing used referenced in Ref. The source of an error is in Src.
 // Non-variable targets (calls, literals) are reported as semantic violations.
 //
-//	errors.As(err, &target) // Src: "err", Target: "target", Ref: "errors"."As"
+//	errors.As(err, &target) // Var: "err", Target: "target", Ref: "errors"."As"
 //
 // And these will be reported:
 //

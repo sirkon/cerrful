@@ -42,13 +42,13 @@ type ExprCall struct {
 	Ref     Reference
 }
 
-// ExprWrap represents a wrapping operation combining an error source
+// ExprWrap represents a wrapping operation combining an error variable
 // and a message.
 //
-//	errors.Wrap(err, "do something")    // Src: <ExprFor>(err), Msg: "do something", Ref: "custom/errs/pkg"."Wrap"
-//	fmt.Errorf("do something: %w", err) // Src: <ExprFor>(err), Msg: "do something", Ref: "fmt"."Errorf"
+//	errors.Wrap(err, "do something")    // Var: <ExprFor>(err), Msg: "do something", Ref: "custom/errs/pkg"."Wrap"
+//	fmt.Errorf("do something: %w", err) // Var: <ExprFor>(err), Msg: "do something", Ref: "fmt"."Errorf"
 type ExprWrap struct {
-	Src Statement
+	Var *ExprVar
 	Msg string
 	Ref Reference
 }

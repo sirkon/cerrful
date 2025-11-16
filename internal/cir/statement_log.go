@@ -31,7 +31,7 @@ type Log struct {
 type LogLevel int
 
 const (
-	LogLevelUnknown LogLevel = iota
+	_ LogLevel = iota
 	LogLevelWarn
 	LogLevelError
 	LogLevelFatal
@@ -47,7 +47,7 @@ func (l LogLevel) String() string {
 	case LogLevelFatal:
 		return "fatal"
 	default:
-		return fmt.Sprintf("unknown(%d)", l)
+		return fmt.Sprintf("log-level-unknown(%d)", l)
 	}
 }
 

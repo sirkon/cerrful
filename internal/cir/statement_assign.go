@@ -3,7 +3,7 @@ package cir
 // Assign represents all assignments having error value at its expectable position – the last one.
 // Here are assignments what would be described this way:
 //
-//	data, err := os.ReadFile(…)         // Dst: &ExprVar{Name: "err"}, Src: &ExprCall{…}
+//	data, err := os.ReadFile(…)         // Dst: &ExprVar{Name: "err"}, Var: &ExprCall{…}
 //	err := os.Rename(oldname, newname)
 //	_, err := writer.Write(…)
 //
@@ -19,7 +19,7 @@ type Assign struct {
 // AssignCheckFlag represents an assignment where the Dest holds the variable and the Source holds RHS
 // for these kind of statements:
 //
-//	ok := errors.Is(errExpr, someErrType)   // Dst: "ok", Src: <ExprFor>(errors.Is(…))
+//	ok := errors.Is(errExpr, someErrType)   // Dst: "ok", Var: <ExprFor>(errors.Is(…))
 //	ok := errors.As(errExpr, &targetErrVar)
 //	ok := errors.IsExists(errExpr)
 //

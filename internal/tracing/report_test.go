@@ -19,7 +19,7 @@ func TestReporter_ReportPhases(t *testing.T) {
 	}{
 		{
 			name:     "source-phase basic",
-			phase:    ReportSource,
+			phase:    ReportScrap,
 			rule:     cerrules.AnnotateExternal(),
 			message:  "Wrap errors when crossing a semantic boundary",
 			filename: "main.go",
@@ -43,7 +43,7 @@ func TestReporter_ReportPhases(t *testing.T) {
 		},
 	}
 
-	var r Reporter
+	var r ReportEngine
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -81,7 +81,7 @@ func TestReporter_ReportPhases(t *testing.T) {
 func TestReporter_ConcurrencySafety(t *testing.T) {
 	const n = 500
 	var (
-		r    Reporter
+		r    ReportEngine
 		wg   sync.WaitGroup
 		fset token.FileSet
 	)

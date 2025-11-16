@@ -1,7 +1,6 @@
 package tracing
 
 import (
-	"go/ast"
 	"go/token"
 
 	"github.com/sirkon/rbtree"
@@ -19,16 +18,12 @@ type Context struct {
 	tree *rbtree.Tree[*contextNodeSpan]
 }
 
-// Add registers a node with its [start,end] token span.
-// The RB-tree orders only disjoint spans; any overlap is reported back via
-// InsertReturn, and we resolve it into a strict containment hierarchy.
-// All ordering/balancing is handled by the underlying rbtree.
-func (c *Context) Add(node cir.Node, start, end token.Pos) {
-	span := &contextNodeSpan{start: start, end: end, node: node}
-	attachInto(c.tree, span)
+type ContextSpan struct {
+	start token.Pos
+	end   token.Pos
 }
 
-// GetByPos returns the most specific (innermost) node covering `pos`.
+// GetByPos exits the most specific (innermost) node covering `pos`.
 func (c *Context) GetByPos(pos token.Pos) cir.Node {
 	probe := &contextNodeSpan{start: pos, end: pos}
 	res := c.tree.Search(probe)
@@ -38,6 +33,11 @@ func (c *Context) GetByPos(pos token.Pos) cir.Node {
 	return descendSearch(res, pos)
 }
 
-func RegisterFile(ctx *Context, file *ast.File) {
-	
+// Add registers a node with its [start,end] token span.
+// The RB-tree orders only disjoint spans; any overlap is reported back via
+// InsertReturn, and we resolve it into a strict containment hierarchy.
+// All ordering/balancing is handled by the underlying rbtree.
+func (c *Context) Add(node cir.Node, s ContextSpan) {
+	span := &contextNodeSpan{start: s.start, end: s.end, node: node}
+	attachInto(c.tree, span)
 }

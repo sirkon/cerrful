@@ -6,7 +6,7 @@
 // control flow without executing the program.
 //
 // The package maintains contextual information for each relevant AST
-// node and collects facts about how errors are used, logged, or
+// node and collects errors about how errors are used, logged, or
 // returned within a given scope.
 //
 // Core components:
@@ -16,7 +16,7 @@
 //     handling state. Tracks spans, ownership, and positional data.
 //
 //   - Error state tracker
-//     Aggregates semantic facts about each error value: creation,
+//     Aggregates semantic errors about each error value: creation,
 //     propagation, wrapping, logging, and return. Enables reasoning
 //     about complete error lifecycles.
 //
