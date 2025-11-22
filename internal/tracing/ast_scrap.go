@@ -3,6 +3,7 @@ package tracing
 import (
 	"fmt"
 	"go/ast"
+	"go/token"
 	"go/types"
 	"strconv"
 	"strings"
@@ -19,17 +20,21 @@ type ScrapEngine struct {
 	wraps         map[Reference]WrapSpec
 	loggers       map[Reference]LoggerSpec
 	ignoredErrors map[Reference]IgnoredError
+	collectors    map[Reference]CollectorSpec
 
-	r *ReporterPhase
+	r    *ReporterPhase
+	fset *token.FileSet
 }
 
-func NewScrapEngine(r *ReporterPhase) *ScrapEngine {
+func NewScrapEngine(r *ReporterPhase, fset *token.FileSet) *ScrapEngine {
 	return &ScrapEngine{
 		news:          make(map[Reference]NewSpec),
 		wraps:         make(map[Reference]WrapSpec),
 		loggers:       make(map[Reference]LoggerSpec),
 		ignoredErrors: make(map[Reference]IgnoredError),
+		collectors:    make(map[Reference]CollectorSpec),
 		r:             r,
+		fset:          fset,
 	}
 }
 
@@ -55,6 +60,10 @@ func (e *ScrapEngine) RegisterIgnoreError(ref Reference) {
 	e.ignoredErrors[ref] = IgnoredError{Ref: ref}
 }
 
+func (e *ScrapEngine) RegisterCollector(ref Reference) {
+	e.collectors[ref] = CollectorSpec{Ref: ref}
+}
+
 // --- Actual logic ---------------------------------------------------------------------------------------------------
 
 // Scrap traverses the file AST and records structural information
@@ -64,76 +73,169 @@ func (e *ScrapEngine) Scrap(
 	pass *analysis.Pass,
 	file *ast.File,
 ) {
-	// gotypes shortcuts
-	info := pass.TypesInfo
-	fset := pass.Fset
+	e.scrapExprs(ctx, pass, file)
+	e.scrapAssignsAndReturns(ctx, pass, file, nil)
+	e.inspectSwitches(ctx, pass, file)
+}
 
-	// Walk the AST
+func (e *ScrapEngine) scrapExprs(ctx *Context, pass *analysis.Pass, file *ast.File) {
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch node := n.(type) {
 
-		// ---------------------------------------
-		// 1. Function calls → wrap/new/log
-		// ---------------------------------------
+		// --------------------------
+		// 1. Call expressions
+		// --------------------------
 		case *ast.CallExpr:
 			e.scrapCall(ctx, pass, node)
 			return true
 
-		// ---------------------------------------
-		// 2. Assignments and general expressions
-		//    (may contain loggers or ignored errors)
-		// ---------------------------------------
-		case *ast.AssignStmt:
-			e.scrapAssign(ctx, pass, node)
+		// --------------------------
+		// 2. Ident — alias to error variable
+		// --------------------------
+		case *ast.Ident:
+			t := pass.TypesInfo.TypeOf(node)
+			if t == nil || !isErrorType(t) {
+				return true
+			}
+
+			ctx.Add(
+				&cir.ExprAlias{Target: node.Name},
+				spanAST(node),
+			)
 			return true
 
-		// ---------------------------------------
-		// 3. Return statements
-		//    (may propagate ignored errors etc.)
-		// ---------------------------------------
+		// --------------------------
+		// 3. SelectorExpr — only sentinel
+		// --------------------------
+		case *ast.SelectorExpr:
+			t := pass.TypesInfo.TypeOf(node)
+			if t == nil || !isErrorType(t) {
+				return true
+			}
+
+			// Check X is package
+			xIdent, ok := node.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+
+			obj := pass.TypesInfo.ObjectOf(xIdent)
+			pkgName, ok := obj.(*types.PkgName)
+			if !ok {
+				return true // not pkg.Err
+			}
+
+			// This is exactly pkg.ErrXXX
+			ctx.Add(
+				&cir.ExprSentinel{
+					Ref: cir.Reference{
+						Package: pkgName.Imported().Path(),
+						Name:    node.Sel.Name,
+					},
+				},
+				spanAST(node),
+			)
+			return true
+		}
+
+		return true
+	})
+}
+
+func isErrorType(t types.Type) bool {
+	return types.Identical(
+		t, types.Universe.Lookup("error").Type(),
+	)
+}
+
+func (e *ScrapEngine) scrapAssignsAndReturns(ctx *Context, pass *analysis.Pass, src ast.Node, returns []*ast.Field) {
+	ast.Inspect(src, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncDecl:
+			e.errorMustBeLastInspection(pass, node.Type.Results)
+
+			namedReturns := getNamedReturnValuesWithError(pass, node.Type.Results)
+			if namedReturns == nil {
+				return true
+			}
+
+			e.scrapAssignsAndReturns(ctx, pass, node.Body, namedReturns)
+			return false
+
+		case *ast.FuncLit:
+			e.errorMustBeLastInspection(pass, node.Type.Results)
+
+			namedReturns := getNamedReturnValuesWithError(pass, node.Type.Results)
+			if namedReturns == nil {
+				return true
+			}
+
+			e.scrapAssignsAndReturns(ctx, pass, node.Body, namedReturns)
+			return false
+
 		case *ast.ReturnStmt:
-			e.scrapReturn(ctx, pass, node)
-			return true
+			switch {
+			case len(node.Results) == 0 && len(returns) == 0:
+				return true
+			case len(node.Results) == 0 && len(returns) != 0:
+				names := returns[len(returns)-1].Names
+				last := names[len(names)-1]
+				ctx.Add(
+					&cir.Return{
+						Val: &cir.ExprVar{
+							Name: last.Name,
+						},
+					},
+					spanAST(node),
+				)
+			case len(node.Results) != 0:
+				expr := node.Results[len(node.Results)-1]
+				t := pass.TypesInfo.TypeOf(expr)
+				if t == nil || !isErrorType(t) {
+					return true
+				}
 
-		// ---------------------------------------
-		// IF statements
-		// ---------------------------------------
-		case *ast.IfStmt:
-			e.scrapIf(ctx, pass, node)
-			return true
+				unpar := stripParens(expr)
+				v, errRpt := contextShouldGet[cir.Expr](ctx, unpar.Pos())
+				if errRpt != nil {
+					panic(errRpt(e.fset))
+				}
 
-		// ---------------------------------------
-		// SWITCH statements
-		// ---------------------------------------
-		case *ast.SwitchStmt:
-			e.scrapSwitch(ctx, pass, node)
-			return true
+				ctx.Add(
+					&cir.Return{
+						Val: v,
+					},
+					spanAST(node),
+				)
+			}
 
-		case *ast.TypeSwitchStmt:
-			e.scrapTypeSwitch(ctx, pass, node)
-			return true
-
+		case *ast.AssignStmt:
 		default:
 			return true
 		}
 	})
 }
 
-func (e *ScrapEngine) scrapCall(
+func (e *ScrapEngine) inspectSwitches(ctx *Context, pass *analysis.Pass, file *ast.File) {
+
+}
+
+func (e *ScrapEngine) scrapCallX(
 	ctx *Context,
 	pass *analysis.Pass,
-	fn *Fn,
 	call *ast.CallExpr,
 ) {
+	fn := e.resolveFn(pass, call)
+	if fn == nil {
+		return
+	}
+
 	ref := resolveFuncRef(fn)
 	if ref == nil {
 		return
 	}
 
-	span := ContextSpan{
-		start: call.Pos(),
-		end:   call.End(),
-	}
+	span := spanAST(call)
 
 	// error not last in returns
 	if sig := fn.Sig; sig != nil {
@@ -208,16 +310,40 @@ func (e *ScrapEngine) scrapCall(
 
 	// logger
 	if ls, ok := e.loggers[*ref]; ok {
-		// TODO EXTRACT_LOGGING_COMPONENTS
-		ctx.Add(
-			&cir.Log{
-				Var:   nil,
-				Level: 0,
-				Msg:   "",
-				Ref:   ls.Ref.CIR(),
-			},
-			span,
-		)
+		var loggedErrors []*ast.Ident
+		ast.Inspect(call, func(n ast.Node) bool {
+			expr, ok := n.(ast.Expr)
+			if !ok {
+				return true
+			}
+			if types.Identical(
+				pass.TypesInfo.TypeOf(expr),
+				types.Universe.Lookup("error").Type(),
+			) {
+				id, ok := expr.(*ast.Ident)
+				if !ok {
+					e.r.Report(cerrules.FixBeforeUse(), "", expr.Pos())
+					return true
+				}
+
+				loggedErrors = append(loggedErrors, id)
+			}
+
+			return true
+		})
+
+		for _, logged := range loggedErrors {
+			ctx.Add(
+				&cir.Log{
+					Var:   cir.ExprVar{Name: logged.Name},
+					Level: ls.Level.CIR(),
+					Msg:   "", // Do we really need this?
+					Ref:   ls.Ref.CIR(),
+				},
+				spanAST(logged),
+			)
+		}
+
 		return
 	}
 
@@ -242,17 +368,17 @@ func (e *ScrapEngine) scrapCall(
 	)
 }
 
-func (e *ScrapEngine) scrapAssign(
+func (e *ScrapEngine) scrapAssignX(
 	ctx *Context,
 	pass *analysis.Pass,
 	as *ast.AssignStmt,
 ) {
-	// Here we can:
-	// - detect logging patterns
-	// - detect ignored errors in multi-value returns
+	errorType := types.Universe.Lookup("error").Type()
+
+	// TODO добавить логику
 }
 
-func (e *ScrapEngine) scrapReturn(
+func (e *ScrapEngine) scrapReturnX(
 	ctx *Context,
 	pass *analysis.Pass,
 	ret *ast.ReturnStmt,
@@ -363,6 +489,165 @@ func (e *ScrapEngine) scrapFmtDetails(
 	return src, msg, false
 }
 
+func (e *ScrapEngine) extractErrorVarsFromLogging(
+	pass *analysis.Pass,
+	call *ast.CallExpr,
+) []*cir.ExprVar {
+
+}
+
+func (e *ScrapEngine) resolveFn(
+	pass *analysis.Pass,
+	call *ast.CallExpr,
+) *Fn {
+	fun := call.Fun
+
+	// Unwrap parentheses
+	for {
+		if p, ok := fun.(*ast.ParenExpr); ok {
+			fun = p.X
+		} else {
+			break
+		}
+	}
+
+	switch fn := fun.(type) {
+
+	// case 1: simple identifier, like f()
+	case *ast.Ident:
+		obj := pass.TypesInfo.Uses[fn]
+		if obj == nil {
+			return nil
+		}
+		fnObj, ok := obj.(*types.Func)
+		if !ok {
+			return nil
+		}
+		sig, ok := fnObj.Type().(*types.Signature)
+		if !ok {
+			return nil
+		}
+		return &Fn{Name: fnObj.Name(), Sig: sig, Obj: fnObj}
+
+	// case 2: selector, like pkg.Foo(), obj.Method()
+	case *ast.SelectorExpr:
+		sel := pass.TypesInfo.Selections[fn]
+		if sel != nil {
+			// method of a type: x.Method()
+			fnObj, ok := sel.Obj().(*types.Func)
+			if !ok {
+				return nil
+			}
+			sig, ok := fnObj.Type().(*types.Signature)
+			if !ok {
+				return nil
+			}
+			return &Fn{Name: fnObj.Name(), Sig: sig, Obj: fnObj}
+		}
+
+		// top-level: pkg.Func
+		obj := pass.TypesInfo.Uses[fn.Sel]
+		if obj == nil {
+			return nil
+		}
+		fnObj, ok := obj.(*types.Func)
+		if !ok {
+			return nil
+		}
+		sig, ok := fnObj.Type().(*types.Signature)
+		if !ok {
+			return nil
+		}
+		return &Fn{Name: fnObj.Name(), Sig: sig, Obj: fnObj}
+
+	default:
+		// Could be IndexExpr, FuncLit, TypeAssert, etc.
+		// Try last resort: TypeOf(fun)
+		t := pass.TypesInfo.TypeOf(fun)
+		if t == nil {
+			return nil
+		}
+		if sig, ok := t.(*types.Signature); ok {
+			// Synthetic function value (func literal, etc.)
+			return &Fn{
+				Name: "<func>",
+				Sig:  sig,
+				Obj:  nil,
+			}
+		}
+		return nil
+	}
+}
+
+func (e *ScrapEngine) errorMustBeLastInspection(pass *analysis.Pass, returns *ast.FieldList) {
+	if returns == nil {
+		return
+	}
+
+	lastIndex := len(returns.List) - 1
+	for i, ret := range returns.List {
+		t := pass.TypesInfo.TypeOf(ret.Type)
+		if t == nil {
+			continue
+		}
+
+		if !types.Identical(t, types.Universe.Lookup("error").Type()) {
+			continue
+		}
+
+		if i != lastIndex {
+			e.r.Report(cerrules.ErrorMustBeLastReturnValue(), "", ret.Pos())
+			continue
+		}
+
+		if len(ret.Names) > 1 {
+			names := ret.Names[:len(ret.Names)-1]
+			for _, name := range names {
+				e.r.Report(cerrules.ErrorMustBeLastReturnValue(), "", name.Pos())
+			}
+		}
+	}
+}
+
+func (e *ScrapEngine) panicMissingNodeBlob(pos token.Pos, what string) error {
+	return fmt.Errorf("%s missing %s definition for this place", e.fset.Position(pos), what)
+}
+
+func (e *ScrapEngine) panicNotAnExprBlob(pos token.Pos, cirNode cir.Node) error {
+	return fmt.Errorf("%s CIR expression defintion expected, got %T", e.fset.Position(pos), cirNode)
+}
+
+func getNamedReturnValuesWithError(pass *analysis.Pass, returns *ast.FieldList) []*ast.Field {
+	if returns == nil {
+		return nil
+	}
+
+	if len(returns.List) == 0 {
+		return nil
+	}
+
+	last := returns.List[len(returns.List)-1]
+	if len(last.Names) == 0 {
+		return nil
+	}
+
+	t := pass.TypesInfo.TypeOf(last.Type)
+	if t == nil || !isErrorType(t) {
+		return nil
+	}
+
+	return returns.List
+}
+
+func stripParens(expr ast.Expr) ast.Expr {
+	v, ok := expr.(*ast.ParenExpr)
+	if !ok {
+		return expr
+	}
+
+	return stripParens(v.X)
+}
+
 type Fn struct {
 	Name string
 	Sig  *types.Signature
@@ -403,5 +688,12 @@ func extractStringLit(v ast.Expr) *ast.BasicLit {
 		return extractStringLit(vv.X)
 	default:
 		return nil
+	}
+}
+
+func spanAST(n ast.Node) ContextSpan {
+	return ContextSpan{
+		start: n.Pos(),
+		end:   n.End(),
 	}
 }

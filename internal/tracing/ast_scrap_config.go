@@ -105,6 +105,76 @@ func (k *LoggingKind) MarshalText() ([]byte, error) {
 	}
 }
 
+// LogLevel is the configuration-facing DTO for logging severity levels.
+//
+// NOTE: This is distinct from cir.LogLevel (internal CIR enum).
+//
+//	config.LogLevel ←parsed→ cir.LogLevel
+type LogLevel int
+
+const (
+	_ LogLevel = iota
+	LogLevelWarn
+	LogLevelError
+	LogLevelFatal
+	// LogLevelInfo
+	// LogLevelDebug
+)
+
+var _ encoding.TextMarshaler = (*LogLevel)(nil)
+var _ encoding.TextUnmarshaler = (*LogLevel)(nil)
+
+// String implements fmt.Stringer — config-visible form.
+func (l *LogLevel) String() string {
+	v, err := l.MarshalText()
+	if err != nil {
+		return fmt.Sprintf("config-log-level-invalid(%d)", l)
+	}
+	return string(v)
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (l *LogLevel) MarshalText() ([]byte, error) {
+	switch *l {
+	case LogLevelWarn:
+		return []byte("warn"), nil
+	case LogLevelError:
+		return []byte("error"), nil
+	case LogLevelFatal:
+		return []byte("fatal"), nil
+	}
+	return nil, fmt.Errorf("cannot marshal invalid LogLevel(%d)", l)
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (l *LogLevel) UnmarshalText(b []byte) error {
+	switch string(b) {
+	case "warn":
+		*l = LogLevelWarn
+		return nil
+	case "error":
+		*l = LogLevelError
+		return nil
+	case "fatal":
+		*l = LogLevelFatal
+	}
+	return fmt.Errorf("unknown log level %q", b)
+}
+
+// CIR converts configuration-level severity to CIR-level severity.
+func (l *LogLevel) CIR() cir.LogLevel {
+	switch *l {
+	case LogLevelWarn:
+		return cir.LogLevelWarn
+	case LogLevelError:
+		return cir.LogLevelError
+	case LogLevelFatal:
+		return cir.LogLevelFatal
+	default:
+		return 0
+	}
+}
+
 // Reference is a full twin of [cir.Reference] defined for proper layer isolation.
 type Reference struct {
 	Package string
@@ -226,8 +296,17 @@ type WrapSpec struct {
 
 // LoggerSpec describes a registered logger function.
 type LoggerSpec struct {
-	Ref  Reference
-	Kind LoggingKind
+	Ref   Reference
+	Kind  LoggingKind
+	Level LogLevel
+}
+
+// CollectorSpec describes custom error collection primitives, i,e.
+// things like errs = append(errs, err), errors.Join(errs, err),
+// multierrs, etc. It is not like we wholeheartedly support the process:
+// we don't. But this gives us an option to report these cases.
+type CollectorSpec struct {
+	Ref Reference
 }
 
 // NewSpec describes a registered constructor-like new function.

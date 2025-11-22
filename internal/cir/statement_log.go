@@ -21,7 +21,7 @@ import "fmt"
 //	panic(err)
 //	// Var: "err", Level: "fatal", Msg: "", Ref: "builtin"."panic"
 type Log struct {
-	Var   Expr
+	Var   ExprVar
 	Level LogLevel
 	Msg   string
 	Ref   Reference

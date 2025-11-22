@@ -23,6 +23,7 @@ const (
 	CER040AnnotationRequiredForExternalAndMultiLocal
 	CER050HandleInNonErrorFunc
 	CER060NoShadowingOrAliasing
+	CER061NoIgnoredErrors
 	CER065FixBeforeUse
 	CER070ReturnInDefinedErrorState
 	CER080NoErrorDelegation
@@ -31,6 +32,7 @@ const (
 	CER0101AnnotationFormatMustBeLiteral
 	CER102AnnotationFormatMustEndWithW
 	CER150NoLogAndReturn
+	CER999WTF
 )
 
 // String returns the canonical code and short name of the rule.
@@ -51,6 +53,8 @@ func (r Rule) String() string {
 		return "CER050: HandleInNonErrorFunc"
 	case CER060NoShadowingOrAliasing:
 		return "CER060: NoShadowingOrAliasing"
+	case CER061NoIgnoredErrors:
+		return "CER061: NoIgnoredErrors"
 	case CER065FixBeforeUse:
 		return "CER065: FixBeforeUse"
 	case CER070ReturnInDefinedErrorState:
@@ -67,6 +71,8 @@ func (r Rule) String() string {
 		return "CER102: AnnotationFormatMustEndWithW"
 	case CER150NoLogAndReturn:
 		return "CER150: NoLogAndReturn"
+	case CER999WTF:
+		return "CER999: WTF"
 	default:
 		return fmt.Sprintf("rule-unknown(%d)", r)
 	}
@@ -89,6 +95,8 @@ func (r Rule) Description() string {
 		return "Errors in non-error-returning funcs must be logged or panicked."
 	case CER060NoShadowingOrAliasing:
 		return "Reassigning or aliasing tracked errors is forbidden."
+	case CER061NoIgnoredErrors:
+		return "Possible errors must not be ignored."
 	case CER065FixBeforeUse:
 		return "Fix error expression into a variable before control use."
 	case CER070ReturnInDefinedErrorState:
@@ -105,6 +113,8 @@ func (r Rule) Description() string {
 		return "Annotation format must end with ': %w' fragment."
 	case CER150NoLogAndReturn:
 		return "Error must be either logged or returned, never both."
+	case CER999WTF:
+		return "Error morphism invariant violated."
 	default:
 		return fmt.Sprintf("unknwon-rule(%d)", r)
 	}
@@ -121,6 +131,7 @@ func AnnotationRequiredForExternalAndMultiLocal() Rule {
 }
 func HandleInNonErrorFunc() Rule  { return CER050HandleInNonErrorFunc }
 func NoShadowingOrAliasing() Rule { return CER060NoShadowingOrAliasing }
+func NoIgnoredErrors() Rule       { return CER061NoIgnoredErrors }
 func FixBeforeUse() Rule          { return CER065FixBeforeUse }
 func ReturnInDefinedErrorState() Rule {
 	return CER070ReturnInDefinedErrorState
@@ -131,3 +142,4 @@ func TextAndStyleRules() Rule             { return CER100TextAndStyleRules }
 func AnnotationFormatMustBeLiteral() Rule { return CER0101AnnotationFormatMustBeLiteral }
 func AnnotationFormatMustEndWithW() Rule  { return CER102AnnotationFormatMustEndWithW }
 func NoLogAndReturn() Rule                { return CER150NoLogAndReturn }
+func WTF() Rule                           { return CER999WTF }

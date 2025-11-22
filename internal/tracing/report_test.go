@@ -10,36 +10,31 @@ import (
 
 func TestReporter_ReportPhases(t *testing.T) {
 	tests := []struct {
-		name     string
-		phase    ReportPhase
-		rule     cerrules.Rule
-		message  string
-		filename string
-		line     int
+		name    string
+		phase   ReportPhase
+		rule    cerrules.Rule
+		message string
+		pos     token.Pos
 	}{
 		{
-			name:     "source-phase basic",
-			phase:    ReportScrap,
-			rule:     cerrules.AnnotateExternal(),
-			message:  "Wrap errors when crossing a semantic boundary",
-			filename: "main.go",
-			line:     10,
+			name:    "source-phase basic",
+			phase:   ReportScrap,
+			rule:    cerrules.AnnotateExternal(),
+			message: "Wrap errors when crossing a semantic boundary",
 		},
 		{
-			name:     "trace-phase no silent drop",
-			phase:    ReportTrace,
-			rule:     cerrules.NoSilentDrop(),
-			message:  "Error must never be ignored",
-			filename: "trace.go",
-			line:     20,
+			name:    "trace-phase no silent drop",
+			phase:   ReportTrace,
+			rule:    cerrules.NoSilentDrop(),
+			message: "Error must never be ignored",
+			pos:     10,
 		},
 		{
-			name:     "state-phase fix before use",
-			phase:    ReportState,
-			rule:     cerrules.FixBeforeUse(),
-			message:  "variable errFoo used before fixation",
-			filename: "file.go",
-			line:     42,
+			name:    "state-phase fix before use",
+			phase:   ReportState,
+			rule:    cerrules.FixBeforeUse(),
+			message: "variable errFoo used before fixation",
+			pos:     20,
 		},
 	}
 
@@ -48,10 +43,7 @@ func TestReporter_ReportPhases(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			phase := r.Phase(tt.phase)
-			phase.Report(tt.rule, tt.message, token.Position{
-				Filename: tt.filename,
-				Line:     tt.line,
-			})
+			phase.Report(tt.rule, tt.message, tt.pos)
 		})
 	}
 
@@ -71,9 +63,8 @@ func TestReporter_ReportPhases(t *testing.T) {
 		if rep.Message != want.message {
 			t.Errorf("[%s] message mismatch: got %q, want %q", want.name, rep.Message, want.message)
 		}
-		if rep.Pos.Filename != want.filename || rep.Pos.Line != want.line {
-			t.Errorf("[%s] position mismatch: got %s:%d, want %s:%d",
-				want.name, rep.Pos.Filename, rep.Pos.Line, want.filename, want.line)
+		if rep.Pos != want.pos {
+			t.Errorf("[%s] position mismatch: got %d, want %d", want.name, rep.Pos, want.pos)
 		}
 	}
 }
@@ -81,9 +72,8 @@ func TestReporter_ReportPhases(t *testing.T) {
 func TestReporter_ConcurrencySafety(t *testing.T) {
 	const n = 500
 	var (
-		r    ReportEngine
-		wg   sync.WaitGroup
-		fset token.FileSet
+		r  ReportEngine
+		wg sync.WaitGroup
 	)
 	for i := 0; i < n; i++ {
 		wg.Add(1)
@@ -93,7 +83,7 @@ func TestReporter_ConcurrencySafety(t *testing.T) {
 				Phase:    ReportTrace,
 				RuleCode: cerrules.NoSilentDrop(),
 				Message:  "parallel add",
-				Pos:      fset.Position(token.Pos(i)),
+				Pos:      token.Pos(i),
 			})
 		}(i)
 	}
